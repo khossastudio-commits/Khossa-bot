@@ -30,31 +30,33 @@ function importWorkflow(envName, path, workflowId) {
 }
 
 async function main() {
-  if (!process.env.MOTAJA_WORKFLOW_B64) throw new Error('MOTAJA_WORKFLOW_B64 missing');
-  importWorkflow('MOTAJA_WORKFLOW_B64', '/tmp/motaja-workflow.json', 'motaja-wa-v1');
-  importWorkflow('MOTAJA_EVENTS_WORKFLOW_B64', '/tmp/motaja-events-workflow.json', 'motaja-wa-events-v1');
+  const importedMain = importWorkflow('MOTAJA_WORKFLOW_B64', '/tmp/motaja-workflow.json', 'motaja-wa-v1');
+  const importedEvents = importWorkflow('MOTAJA_EVENTS_WORKFLOW_B64', '/tmp/motaja-events-workflow.json', 'motaja-wa-events-v1');
+  if (!importedMain && !importedEvents) throw new Error('No MotaJa workflow payload supplied');
 
-  const response = await fetch(`${process.env.EVOLUTION_API_URL}/webhook/set/motaja`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      apikey: process.env.EVOLUTION_API_KEY,
-    },
-    body: JSON.stringify({
-      webhook: {
-        enabled: true,
-        url: 'https://n8n-production-4cf1.up.railway.app/webhook/motaja-whatsapp',
-        byEvents: false,
-        base64: false,
-        events: ['MESSAGES_UPSERT'],
+  if (process.env.EVOLUTION_API_URL && process.env.EVOLUTION_API_KEY) {
+    const response = await fetch(`${process.env.EVOLUTION_API_URL}/webhook/set/motaja`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        apikey: process.env.EVOLUTION_API_KEY,
       },
-    }),
-  });
-  const text = await response.text();
-  console.log(`MOTAJA_WEBHOOK_STATUS=${response.status}`);
-  if (!response.ok) {
-    console.error(text.slice(0, 500));
-    throw new Error('Evolution webhook configuration failed');
+      body: JSON.stringify({
+        webhook: {
+          enabled: true,
+          url: 'https://n8n-production-4cf1.up.railway.app/webhook/motaja-whatsapp',
+          byEvents: false,
+          base64: false,
+          events: ['MESSAGES_UPSERT'],
+        },
+      }),
+    });
+    const text = await response.text();
+    console.log(`MOTAJA_WEBHOOK_STATUS=${response.status}`);
+    if (!response.ok) {
+      console.error(text.slice(0, 500));
+      throw new Error('Evolution webhook configuration failed');
+    }
   }
 
   console.log('MOTAJA_BOOTSTRAP_COMPLETE');
