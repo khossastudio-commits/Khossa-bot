@@ -14,7 +14,7 @@ async function main() {
   try {
     run(['import:workflow', `--input=${workflowPath}`]);
   } catch (error) {
-    console.log('Import failed once; checking whether workflow may already exist.');
+    console.log('Import failed once; workflow may already exist.');
   }
 
   let published = false;
@@ -39,11 +39,13 @@ async function main() {
       apikey: process.env.EVOLUTION_API_KEY,
     },
     body: JSON.stringify({
-      enabled: true,
-      url: 'https://n8n-production-4cf1.up.railway.app/webhook/motaja-whatsapp',
-      webhookByEvents: false,
-      webhookBase64: false,
-      events: ['MESSAGES_UPSERT'],
+      webhook: {
+        enabled: true,
+        url: 'https://n8n-production-4cf1.up.railway.app/webhook/motaja-whatsapp',
+        byEvents: false,
+        base64: false,
+        events: ['MESSAGES_UPSERT'],
+      },
     }),
   });
   const text = await response.text();
