@@ -1,0 +1,6 @@
+FROM n8nio/n8n:latest
+USER root
+COPY bootstrap.js /opt/motaja/bootstrap.js
+RUN chown node:node /opt/motaja/bootstrap.js
+USER node
+CMD ["node", "/opt/motaja/bootstrap.js"]
