@@ -6,31 +6,33 @@ function run(args) {
   execFileSync('n8n', args, { stdio: 'inherit', env: process.env });
 }
 
-async function main() {
-  if (!process.env.MOTAJA_WORKFLOW_B64) throw new Error('MOTAJA_WORKFLOW_B64 missing');
-  const workflowPath = '/tmp/motaja-workflow.json';
-  fs.writeFileSync(workflowPath, Buffer.from(process.env.MOTAJA_WORKFLOW_B64, 'base64'));
-
+function importWorkflow(envName, path, workflowId) {
+  const encoded = process.env[envName];
+  if (!encoded) return false;
+  fs.writeFileSync(path, Buffer.from(encoded, 'base64'));
   try {
-    run(['import:workflow', `--input=${workflowPath}`]);
+    run(['import:workflow', `--input=${path}`]);
   } catch (error) {
-    console.log('Import failed once; workflow may already exist.');
+    console.log(`Import failed once for ${workflowId}; workflow may already exist.`);
   }
-
-  let published = false;
   for (const args of [
-    ['publish:workflow', '--id=motaja-wa-v1'],
-    ['update:workflow', '--id=motaja-wa-v1', '--active=true'],
+    ['publish:workflow', `--id=${workflowId}`],
+    ['update:workflow', `--id=${workflowId}`, '--active=true'],
   ]) {
     try {
       run(args);
-      published = true;
-      break;
+      return true;
     } catch (error) {
       console.log(`Activation command failed: n8n ${args.join(' ')}`);
     }
   }
-  if (!published) throw new Error('Could not publish/activate motaja-wa-v1');
+  throw new Error(`Could not publish/activate ${workflowId}`);
+}
+
+async function main() {
+  if (!process.env.MOTAJA_WORKFLOW_B64) throw new Error('MOTAJA_WORKFLOW_B64 missing');
+  importWorkflow('MOTAJA_WORKFLOW_B64', '/tmp/motaja-workflow.json', 'motaja-wa-v1');
+  importWorkflow('MOTAJA_EVENTS_WORKFLOW_B64', '/tmp/motaja-events-workflow.json', 'motaja-wa-events-v1');
 
   const response = await fetch(`${process.env.EVOLUTION_API_URL}/webhook/set/motaja`, {
     method: 'POST',
