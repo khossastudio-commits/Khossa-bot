@@ -1,3 +1,4 @@
+// Public WhatsApp gateway v2 — direct Evolution webhook
 import http from 'node:http';
 import crypto from 'node:crypto';
 
