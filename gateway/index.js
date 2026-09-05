@@ -8,7 +8,7 @@ const SECRET=String(process.env.MOTAJA_AGENT_GATEWAY_SECRET||'');
 const SB=String(process.env.SUPABASE_URL||'https://qfdjiqacjeafquoscbnj.supabase.co').replace(/\/+$/,'');
 const TOKEN=String(process.env.WEBHOOK_PATH_TOKEN||'');
 const INSTANCE=String(process.env.EVOLUTION_INSTANCE||'motaja');
-const N8N_WEBHOOK='https://n8n-production-4cf1.up.railway.app/webhook/motaja-whatsapp';
+const PUBLIC_BASE=String(process.env.MOTAJA_GATEWAY_WEBHOOK_BASE||'').replace(/\/+$/,'');
 const MAX_BODY=4*1024*1024;
 const clean=(v,m=1800)=>String(v??'').trim().replace(/\s+/g,' ').slice(0,m);
 
@@ -25,8 +25,42 @@ async function callAgentSlug(slug,input,timeout=35000){const r=await fetch(`${SB
 async function agent(input){return callAgentSlug('motaja-whatsapp-dispatch',input,55000)}
 async function send(phone,text){if(!text)return;const r=await fetch(`${EVO}/message/sendText/${encodeURIComponent(INSTANCE)}`,{method:'POST',headers:{'content-type':'application/json',apikey:KEY},body:JSON.stringify({number:phone.replace(/^\+/,''),text:String(text).slice(0,3800)}),signal:AbortSignal.timeout(15000)});if(!r.ok)throw new Error(`send_${r.status}`)}
 
-async function webhook(body){if(body.event&&!['messages.upsert','MESSAGES_UPSERT'].includes(body.event))return{ok:true,ignored:'event'};const d=body.data||{};if(d?.key?.fromMe===true)return{ok:true,ignored:'from_me'};const remote=String(d?.key?.remoteJid||'');if(remote.endsWith('@g.us')||remote.includes('broadcast'))return{ok:true,ignored:'group'};const id=identity(d);if(!id)return{ok:true,ignored:'identity'};let message=textOf(d.message);const location=locationOf(d.message),m=unwrap(d.message);if(!message&&m.audioMessage){try{message=await transcribe(await media(d));console.log(JSON.stringify({event:'audio_transcribed',chars:message.length}))}catch(e){console.warn(JSON.stringify({event:'audio_failed',reason:clean(e?.message,120)}));await send(id.phone,'Recebi o teu áudio, mas não consegui transcrevê-lo agora. Podes repetir em texto ou enviar outro áudio?');return{ok:true,audio_failed:true}}}if(!message&&!location)return{ok:true,ignored:'empty'};const out=await agent({channel:'whatsapp',conversation_key:id.conversationKey,phone:id.phone,message,location,metadata:{source:'evolution',message_id:clean(d?.key?.id,120)||null,message_type:m.audioMessage?'audio':location?'location':'text'}});if(out?.reply&&!out?.suppress_reply)await send(id.phone,out.reply);return{ok:true,action:out?.action||null,duplicate:out?.duplicate===true}}
+async function webhook(body){
+  if(body.event&&!['messages.upsert','MESSAGES_UPSERT'].includes(body.event))return{ok:true,ignored:'event'};
+  const d=body.data||{};
+  if(d?.key?.fromMe===true)return{ok:true,ignored:'from_me'};
+  const remote=String(d?.key?.remoteJid||'');
+  if(remote.endsWith('@g.us')||remote.includes('broadcast'))return{ok:true,ignored:'group'};
+  const id=identity(d);if(!id)return{ok:true,ignored:'identity'};
+  let message=textOf(d.message);const location=locationOf(d.message),m=unwrap(d.message);
+  if(!message&&m.audioMessage){
+    try{message=await transcribe(await media(d));console.log(JSON.stringify({event:'audio_transcribed',chars:message.length}))}
+    catch(e){console.warn(JSON.stringify({event:'audio_failed',reason:clean(e?.message,120)}));await send(id.phone,'Recebi o teu áudio, mas não consegui transcrevê-lo agora. Podes repetir em texto ou enviar outro áudio?');return{ok:true,audio_failed:true}}
+  }
+  if(!message&&!location)return{ok:true,ignored:'empty'};
+  const out=await agent({channel:'whatsapp',conversation_key:id.conversationKey,phone:id.phone,message,location,metadata:{source:'evolution',message_id:clean(d?.key?.id,120)||null,message_type:m.audioMessage?'audio':location?'location':'text'}});
+  if(out?.reply&&!out?.suppress_reply&&!out?.duplicate)await send(id.phone,out.reply);
+  return{ok:true,action:out?.action||null,duplicate:out?.duplicate===true};
+}
 
-const server=http.createServer(async(req,res)=>{try{const u=new URL(req.url||'/','http://localhost');if(req.method==='GET'&&u.pathname==='/health')return sendJson(res,200,{ok:true,service:'motaja-whatsapp-gateway',version:2,idempotent:true});if(req.method!=='POST'||!u.pathname.startsWith('/webhook/'))return sendJson(res,404,{error:'not_found'});const pathToken=decodeURIComponent(u.pathname.slice('/webhook/'.length));if(!TOKEN||!equal(pathToken,TOKEN))return sendJson(res,404,{error:'not_found'});const body=await readJson(req);const out=await webhook(body);return sendJson(res,200,out)}catch(e){console.error(JSON.stringify({event:'webhook_error',reason:clean(e?.message,160)}));return sendJson(res,200,{ok:false})}});
+async function configureWebhook(){
+  if(String(process.env.AUTO_CONFIGURE_WEBHOOK||'true')!=='true'||!EVO||!KEY||!TOKEN||!PUBLIC_BASE)return;
+  try{
+    const url=`${PUBLIC_BASE}/webhook/${encodeURIComponent(TOKEN)}`;
+    const r=await fetch(`${EVO}/webhook/set/${encodeURIComponent(INSTANCE)}`,{method:'POST',headers:{'content-type':'application/json',apikey:KEY},body:JSON.stringify({webhook:{enabled:true,url,byEvents:false,base64:false,events:['MESSAGES_UPSERT']}}),signal:AbortSignal.timeout(15000)});
+    console.log(JSON.stringify({event:'webhook_configured',status:r.status,transport:'gateway-public'}));
+  }catch(e){console.error(JSON.stringify({event:'webhook_config_failed',reason:clean(e?.message,120)}))}
+}
 
-server.listen(PORT,'0.0.0.0',async()=>{console.log(JSON.stringify({event:'gateway_started',port:PORT,version:2,idempotent:true}));if(String(process.env.AUTO_CONFIGURE_WEBHOOK||'true')!=='true'||!EVO||!KEY)return;try{const r=await fetch(`${EVO}/webhook/set/${encodeURIComponent(INSTANCE)}`,{method:'POST',headers:{'content-type':'application/json',apikey:KEY},body:JSON.stringify({webhook:{enabled:true,url:N8N_WEBHOOK,byEvents:false,base64:false,events:['MESSAGES_UPSERT']}}),signal:AbortSignal.timeout(15000)});console.log(JSON.stringify({event:'webhook_configured',status:r.status,transport:'n8n-public'}))}catch(e){console.error(JSON.stringify({event:'webhook_config_failed',reason:clean(e?.message,120)}))}});
+const server=http.createServer(async(req,res)=>{
+  try{
+    const u=new URL(req.url||'/','http://localhost');
+    if(req.method==='GET'&&u.pathname==='/health')return sendJson(res,200,{ok:true,service:'motaja-whatsapp-gateway',version:2,idempotent:true,transport:'public'});
+    if(req.method!=='POST'||!u.pathname.startsWith('/webhook/'))return sendJson(res,404,{error:'not_found'});
+    const pathToken=decodeURIComponent(u.pathname.slice('/webhook/'.length));
+    if(!TOKEN||!equal(pathToken,TOKEN))return sendJson(res,404,{error:'not_found'});
+    const body=await readJson(req);const out=await webhook(body);return sendJson(res,200,out);
+  }catch(e){console.error(JSON.stringify({event:'webhook_error',reason:clean(e?.message,160)}));return sendJson(res,200,{ok:false})}
+});
+
+server.listen(PORT,'0.0.0.0',async()=>{console.log(JSON.stringify({event:'gateway_started',port:PORT,version:2,idempotent:true,transport:'public'}));await configureWebhook()});
