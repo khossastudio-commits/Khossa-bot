@@ -1,4 +1,4 @@
-// Public WhatsApp gateway v3 — direct Evolution webhook
+// Public WhatsApp gateway v4 — direct Evolution webhook + natural MotaJá dispatcher
 import http from 'node:http';
 import crypto from 'node:crypto';
 
@@ -28,7 +28,7 @@ async function readJson(req){let total=0;const chunks=[];for await(const chunk o
 async function media(data){const r=await fetch(`${EVO}/chat/getBase64FromMediaMessage/${encodeURIComponent(INSTANCE)}`,{method:'POST',headers:{'content-type':'application/json',apikey:KEY},body:JSON.stringify({message:data}),signal:AbortSignal.timeout(20000)});const raw=await r.text();if(!r.ok)throw new Error(`media_${r.status}`);const p=JSON.parse(raw),base64=String(p?.base64||'');if(!base64)throw new Error('media_empty');return{base64,mimetype:clean(p?.mimetype||'audio/ogg',100)}}
 async function transcribe(x){const r=await fetch(`${SB}/functions/v1/motaja-transcribe-audio`,{method:'POST',headers:{'content-type':'application/json','x-motaja-agent-secret':SECRET},body:JSON.stringify(x),signal:AbortSignal.timeout(35000)});const p=await r.json().catch(()=>null);if(!r.ok||!p?.text)throw new Error(p?.error||`stt_${r.status}`);return clean(p.text)}
 async function callAgentSlug(slug,input,timeout=35000){const r=await fetch(`${SB}/functions/v1/${slug}`,{method:'POST',headers:{'content-type':'application/json','x-motaja-agent-secret':SECRET},body:JSON.stringify(input),signal:AbortSignal.timeout(timeout)});const p=await r.json().catch(()=>null);if(!r.ok||!p)throw new Error(`${slug}_${r.status}`);return p}
-async function agent(input){return callAgentSlug('motaja-whatsapp-dispatch',input,55000)}
+async function agent(input){return callAgentSlug('motaja-whatsapp-dispatch-v2',input,65000)}
 
 function splitReply(value,max=MAX_CHUNK){
   let rest=String(value??'').trim();
@@ -36,16 +36,7 @@ function splitReply(value,max=MAX_CHUNK){
   const parts=[];
   while(rest.length>max){
     const window=rest.slice(0,max+1);
-    const candidates=[
-      window.lastIndexOf('\n\n'),
-      window.lastIndexOf('\n'),
-      window.lastIndexOf('. '),
-      window.lastIndexOf('! '),
-      window.lastIndexOf('? '),
-      window.lastIndexOf('; '),
-      window.lastIndexOf(', '),
-      window.lastIndexOf(' '),
-    ].filter(n=>n>=Math.floor(max*0.55));
+    const candidates=[window.lastIndexOf('\n\n'),window.lastIndexOf('\n'),window.lastIndexOf('. '),window.lastIndexOf('! '),window.lastIndexOf('? '),window.lastIndexOf('; '),window.lastIndexOf(', '),window.lastIndexOf(' ')].filter(n=>n>=Math.floor(max*0.55));
     let cut=candidates.length?Math.max(...candidates):max;
     if(cut<=0)cut=max;
     const part=rest.slice(0,cut+(rest[cut]==='.'||rest[cut]==='!'||rest[cut]==='?'?1:0)).trim();
@@ -55,24 +46,9 @@ function splitReply(value,max=MAX_CHUNK){
   if(rest)parts.push(rest);
   return parts;
 }
-function typingDelay(text){
-  const calculated=900+String(text).length*TYPE_PER_CHAR+Math.floor(Math.random()*450);
-  return Math.max(TYPE_MIN,Math.min(TYPE_MAX,calculated));
-}
-async function sendOne(phone,text,delay){
-  const r=await fetch(`${EVO}/message/sendText/${encodeURIComponent(INSTANCE)}`,{method:'POST',headers:{'content-type':'application/json',apikey:KEY},body:JSON.stringify({number:phone.replace(/^\+/,''),text:String(text).slice(0,3800),delay}),signal:AbortSignal.timeout(Math.max(15000,delay+10000))});
-  if(!r.ok){const raw=await r.text().catch(()=>'');throw new Error(`send_${r.status}_${clean(raw,100)}`)}
-}
-async function send(phone,text){
-  const parts=splitReply(text);
-  if(!parts.length)return;
-  for(let i=0;i<parts.length;i++){
-    const delay=typingDelay(parts[i]);
-    await sendOne(phone,parts[i],delay);
-    if(i<parts.length-1)await sleep(500+Math.floor(Math.random()*650));
-  }
-  console.log(JSON.stringify({event:'whatsapp_reply_sent',parts:parts.length,chars:String(text).length}));
-}
+function typingDelay(text){const calculated=900+String(text).length*TYPE_PER_CHAR+Math.floor(Math.random()*450);return Math.max(TYPE_MIN,Math.min(TYPE_MAX,calculated))}
+async function sendOne(phone,text,delay){const r=await fetch(`${EVO}/message/sendText/${encodeURIComponent(INSTANCE)}`,{method:'POST',headers:{'content-type':'application/json',apikey:KEY},body:JSON.stringify({number:phone.replace(/^\+/,''),text:String(text).slice(0,3800),delay}),signal:AbortSignal.timeout(Math.max(15000,delay+10000))});if(!r.ok){const raw=await r.text().catch(()=>'');throw new Error(`send_${r.status}_${clean(raw,100)}`)}}
+async function send(phone,text){const parts=splitReply(text);if(!parts.length)return;for(let i=0;i<parts.length;i++){const delay=typingDelay(parts[i]);await sendOne(phone,parts[i],delay);if(i<parts.length-1)await sleep(500+Math.floor(Math.random()*650))}console.log(JSON.stringify({event:'whatsapp_reply_sent',parts:parts.length,chars:String(text).length}))}
 
 async function webhook(body){
   if(body.event&&!['messages.upsert','MESSAGES_UPSERT'].includes(body.event))return{ok:true,ignored:'event'};
@@ -82,34 +58,15 @@ async function webhook(body){
   if(remote.endsWith('@g.us')||remote.includes('broadcast'))return{ok:true,ignored:'group'};
   const id=identity(d);if(!id)return{ok:true,ignored:'identity'};
   let message=textOf(d.message);const location=locationOf(d.message),m=unwrap(d.message);
-  if(!message&&m.audioMessage){
-    try{message=await transcribe(await media(d));console.log(JSON.stringify({event:'audio_transcribed',chars:message.length}))}
-    catch(e){console.warn(JSON.stringify({event:'audio_failed',reason:clean(e?.message,120)}));await send(id.phone,'Recebi o teu áudio, mas não consegui transcrevê-lo agora. Podes repetir em texto ou enviar outro áudio?');return{ok:true,audio_failed:true}}
-  }
+  if(!message&&m.audioMessage){try{message=await transcribe(await media(d));console.log(JSON.stringify({event:'audio_transcribed',chars:message.length}))}catch(e){console.warn(JSON.stringify({event:'audio_failed',reason:clean(e?.message,120)}));await send(id.phone,'Recebi o teu áudio, mas não consegui transcrevê-lo agora. Podes repetir em texto ou enviar outro áudio?');return{ok:true,audio_failed:true}}}
   if(!message&&!location)return{ok:true,ignored:'empty'};
   const out=await agent({channel:'whatsapp',conversation_key:id.conversationKey,phone:id.phone,message,location,metadata:{source:'evolution',message_id:clean(d?.key?.id,120)||null,message_type:m.audioMessage?'audio':location?'location':'text'}});
   if(out?.reply&&!out?.suppress_reply&&!out?.duplicate)await send(id.phone,out.reply);
   return{ok:true,action:out?.action||null,duplicate:out?.duplicate===true};
 }
 
-async function configureWebhook(){
-  if(String(process.env.AUTO_CONFIGURE_WEBHOOK||'true')!=='true'||!EVO||!KEY||!TOKEN||!PUBLIC_BASE)return;
-  try{
-    const url=`${PUBLIC_BASE}/webhook/${encodeURIComponent(TOKEN)}`;
-    const r=await fetch(`${EVO}/webhook/set/${encodeURIComponent(INSTANCE)}`,{method:'POST',headers:{'content-type':'application/json',apikey:KEY},body:JSON.stringify({webhook:{enabled:true,url,byEvents:false,base64:false,events:['MESSAGES_UPSERT']}}),signal:AbortSignal.timeout(15000)});
-    console.log(JSON.stringify({event:'webhook_configured',status:r.status,transport:'gateway-public'}));
-  }catch(e){console.error(JSON.stringify({event:'webhook_config_failed',reason:clean(e?.message,120)}))}
-}
+async function configureWebhook(){if(String(process.env.AUTO_CONFIGURE_WEBHOOK||'true')!=='true'||!EVO||!KEY||!TOKEN||!PUBLIC_BASE)return;try{const url=`${PUBLIC_BASE}/webhook/${encodeURIComponent(TOKEN)}`;const r=await fetch(`${EVO}/webhook/set/${encodeURIComponent(INSTANCE)}`,{method:'POST',headers:{'content-type':'application/json',apikey:KEY},body:JSON.stringify({webhook:{enabled:true,url,byEvents:false,base64:false,events:['MESSAGES_UPSERT']}}),signal:AbortSignal.timeout(15000)});console.log(JSON.stringify({event:'webhook_configured',status:r.status,transport:'gateway-public'}))}catch(e){console.error(JSON.stringify({event:'webhook_config_failed',reason:clean(e?.message,120)}))}}
 
-const server=http.createServer(async(req,res)=>{
-  try{
-    const u=new URL(req.url||'/','http://localhost');
-    if(req.method==='GET'&&u.pathname==='/health')return sendJson(res,200,{ok:true,service:'motaja-whatsapp-gateway',version:3,idempotent:true,transport:'public',typingDelay:true,splitReplies:true});
-    if(req.method!=='POST'||!u.pathname.startsWith('/webhook/'))return sendJson(res,404,{error:'not_found'});
-    const pathToken=decodeURIComponent(u.pathname.slice('/webhook/'.length));
-    if(!TOKEN||!equal(pathToken,TOKEN))return sendJson(res,404,{error:'not_found'});
-    const body=await readJson(req);const out=await webhook(body);return sendJson(res,200,out);
-  }catch(e){console.error(JSON.stringify({event:'webhook_error',reason:clean(e?.message,160)}));return sendJson(res,200,{ok:false})}
-});
+const server=http.createServer(async(req,res)=>{try{const u=new URL(req.url||'/','http://localhost');if(req.method==='GET'&&u.pathname==='/health')return sendJson(res,200,{ok:true,service:'motaja-whatsapp-gateway',version:4,idempotent:true,transport:'public',typingDelay:true,splitReplies:true,naturalConversation:true});if(req.method!=='POST'||!u.pathname.startsWith('/webhook/'))return sendJson(res,404,{error:'not_found'});const pathToken=decodeURIComponent(u.pathname.slice('/webhook/'.length));if(!TOKEN||!equal(pathToken,TOKEN))return sendJson(res,404,{error:'not_found'});const body=await readJson(req);const out=await webhook(body);return sendJson(res,200,out)}catch(e){console.error(JSON.stringify({event:'webhook_error',reason:clean(e?.message,160)}));return sendJson(res,200,{ok:false})}});
 
-server.listen(PORT,'0.0.0.0',async()=>{console.log(JSON.stringify({event:'gateway_started',port:PORT,version:3,idempotent:true,transport:'public',typingDelay:true,splitReplies:true}));await configureWebhook()});
+server.listen(PORT,'0.0.0.0',async()=>{console.log(JSON.stringify({event:'gateway_started',port:PORT,version:4,idempotent:true,transport:'public',typingDelay:true,splitReplies:true,naturalConversation:true}));await configureWebhook()});
