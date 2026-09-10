@@ -1,4 +1,4 @@
-// Public WhatsApp gateway v2 — direct Evolution webhook
+// Public WhatsApp gateway v3 — direct Evolution webhook
 import http from 'node:http';
 import crypto from 'node:crypto';
 
@@ -11,7 +11,12 @@ const TOKEN=String(process.env.WEBHOOK_PATH_TOKEN||'');
 const INSTANCE=String(process.env.EVOLUTION_INSTANCE||'motaja');
 const PUBLIC_BASE=String(process.env.MOTAJA_GATEWAY_WEBHOOK_BASE||'').replace(/\/+$/,'');
 const MAX_BODY=4*1024*1024;
+const MAX_CHUNK=Math.max(260,Math.min(1200,Number(process.env.WHATSAPP_MAX_CHUNK_CHARS||520)));
+const TYPE_MIN=Math.max(500,Number(process.env.WHATSAPP_TYPING_MIN_MS||1200));
+const TYPE_MAX=Math.max(TYPE_MIN,Number(process.env.WHATSAPP_TYPING_MAX_MS||4800));
+const TYPE_PER_CHAR=Math.max(2,Math.min(40,Number(process.env.WHATSAPP_TYPING_MS_PER_CHAR||10)));
 const clean=(v,m=1800)=>String(v??'').trim().replace(/\s+/g,' ').slice(0,m);
+const sleep=(ms)=>new Promise(resolve=>setTimeout(resolve,ms));
 
 function equal(a,b){const x=Buffer.from(String(a)),y=Buffer.from(String(b));return x.length===y.length&&crypto.timingSafeEqual(x,y)}
 function unwrap(m={}){for(let i=0;i<4;i++){if(m.ephemeralMessage?.message)m=m.ephemeralMessage.message;else if(m.viewOnceMessage?.message)m=m.viewOnceMessage.message;else if(m.viewOnceMessageV2?.message)m=m.viewOnceMessageV2.message;else break}return m}
@@ -24,7 +29,50 @@ async function media(data){const r=await fetch(`${EVO}/chat/getBase64FromMediaMe
 async function transcribe(x){const r=await fetch(`${SB}/functions/v1/motaja-transcribe-audio`,{method:'POST',headers:{'content-type':'application/json','x-motaja-agent-secret':SECRET},body:JSON.stringify(x),signal:AbortSignal.timeout(35000)});const p=await r.json().catch(()=>null);if(!r.ok||!p?.text)throw new Error(p?.error||`stt_${r.status}`);return clean(p.text)}
 async function callAgentSlug(slug,input,timeout=35000){const r=await fetch(`${SB}/functions/v1/${slug}`,{method:'POST',headers:{'content-type':'application/json','x-motaja-agent-secret':SECRET},body:JSON.stringify(input),signal:AbortSignal.timeout(timeout)});const p=await r.json().catch(()=>null);if(!r.ok||!p)throw new Error(`${slug}_${r.status}`);return p}
 async function agent(input){return callAgentSlug('motaja-whatsapp-dispatch',input,55000)}
-async function send(phone,text){if(!text)return;const r=await fetch(`${EVO}/message/sendText/${encodeURIComponent(INSTANCE)}`,{method:'POST',headers:{'content-type':'application/json',apikey:KEY},body:JSON.stringify({number:phone.replace(/^\+/,''),text:String(text).slice(0,3800)}),signal:AbortSignal.timeout(15000)});if(!r.ok)throw new Error(`send_${r.status}`)}
+
+function splitReply(value,max=MAX_CHUNK){
+  let rest=String(value??'').trim();
+  if(!rest)return[];
+  const parts=[];
+  while(rest.length>max){
+    const window=rest.slice(0,max+1);
+    const candidates=[
+      window.lastIndexOf('\n\n'),
+      window.lastIndexOf('\n'),
+      window.lastIndexOf('. '),
+      window.lastIndexOf('! '),
+      window.lastIndexOf('? '),
+      window.lastIndexOf('; '),
+      window.lastIndexOf(', '),
+      window.lastIndexOf(' '),
+    ].filter(n=>n>=Math.floor(max*0.55));
+    let cut=candidates.length?Math.max(...candidates):max;
+    if(cut<=0)cut=max;
+    const part=rest.slice(0,cut+(rest[cut]==='.'||rest[cut]==='!'||rest[cut]==='?'?1:0)).trim();
+    if(part)parts.push(part);
+    rest=rest.slice(Math.max(cut,part.length)).trimStart();
+  }
+  if(rest)parts.push(rest);
+  return parts;
+}
+function typingDelay(text){
+  const calculated=900+String(text).length*TYPE_PER_CHAR+Math.floor(Math.random()*450);
+  return Math.max(TYPE_MIN,Math.min(TYPE_MAX,calculated));
+}
+async function sendOne(phone,text,delay){
+  const r=await fetch(`${EVO}/message/sendText/${encodeURIComponent(INSTANCE)}`,{method:'POST',headers:{'content-type':'application/json',apikey:KEY},body:JSON.stringify({number:phone.replace(/^\+/,''),text:String(text).slice(0,3800),delay}),signal:AbortSignal.timeout(Math.max(15000,delay+10000))});
+  if(!r.ok){const raw=await r.text().catch(()=>'');throw new Error(`send_${r.status}_${clean(raw,100)}`)}
+}
+async function send(phone,text){
+  const parts=splitReply(text);
+  if(!parts.length)return;
+  for(let i=0;i<parts.length;i++){
+    const delay=typingDelay(parts[i]);
+    await sendOne(phone,parts[i],delay);
+    if(i<parts.length-1)await sleep(500+Math.floor(Math.random()*650));
+  }
+  console.log(JSON.stringify({event:'whatsapp_reply_sent',parts:parts.length,chars:String(text).length}));
+}
 
 async function webhook(body){
   if(body.event&&!['messages.upsert','MESSAGES_UPSERT'].includes(body.event))return{ok:true,ignored:'event'};
@@ -56,7 +104,7 @@ async function configureWebhook(){
 const server=http.createServer(async(req,res)=>{
   try{
     const u=new URL(req.url||'/','http://localhost');
-    if(req.method==='GET'&&u.pathname==='/health')return sendJson(res,200,{ok:true,service:'motaja-whatsapp-gateway',version:2,idempotent:true,transport:'public'});
+    if(req.method==='GET'&&u.pathname==='/health')return sendJson(res,200,{ok:true,service:'motaja-whatsapp-gateway',version:3,idempotent:true,transport:'public',typingDelay:true,splitReplies:true});
     if(req.method!=='POST'||!u.pathname.startsWith('/webhook/'))return sendJson(res,404,{error:'not_found'});
     const pathToken=decodeURIComponent(u.pathname.slice('/webhook/'.length));
     if(!TOKEN||!equal(pathToken,TOKEN))return sendJson(res,404,{error:'not_found'});
@@ -64,4 +112,4 @@ const server=http.createServer(async(req,res)=>{
   }catch(e){console.error(JSON.stringify({event:'webhook_error',reason:clean(e?.message,160)}));return sendJson(res,200,{ok:false})}
 });
 
-server.listen(PORT,'0.0.0.0',async()=>{console.log(JSON.stringify({event:'gateway_started',port:PORT,version:2,idempotent:true,transport:'public'}));await configureWebhook()});
+server.listen(PORT,'0.0.0.0',async()=>{console.log(JSON.stringify({event:'gateway_started',port:PORT,version:3,idempotent:true,transport:'public',typingDelay:true,splitReplies:true}));await configureWebhook()});
